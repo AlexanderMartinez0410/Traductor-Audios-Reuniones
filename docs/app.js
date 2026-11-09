@@ -1,7 +1,7 @@
 (() => {
   // =========================================================================
-  // SISTEMA AUDIO ESCRITO — CLIENT-SIDE (SILENCIOSO Y ULTRARRÁPIDO)
-  // Sin reproducción de audio. Transcribe 10 min en ~3s vía API directa.
+  // SISTEMA AUDIO ESCRITO — MOTOR KALDI EN WEBASSEMBLY (SIN IA, EN SILENCIO)
+  // Decodifica audio en memoria con OfflineAudioContext y procesa con Vosk Wasm
   // =========================================================================
 
   let currentFile = null;
@@ -9,6 +9,9 @@
   let historyItems = [];
   let readerFontSize = 1.05;
   let segmentsModified = false;
+  let loadedVoskModel = null;
+
+  const VOSK_ES_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
 
   const STOPWORDS = new Set([
     "el","la","los","las","un","una","unos","unas","lo","al","del","de","en","por","para","con","sin",
@@ -21,8 +24,7 @@
     "estaba","haber","hay","he","ha","hemos","han","había","tener","tiene","tienen","hacer","hace","hizo",
     "ir","va","vamos","van","poder","puede","pueden","decir","dice","dijo","ver","ve","dar","da",
     "también","así","bien","mal","aquí","ahí","allí","ahora","antes","después","luego","entonces","siempre",
-    "nunca","bueno","buena","gran","mucho","mucha","eh","ah","mm","verdad","claro","the","be","to","of",
-    "and","a","in","that","have","i","it","for","not","on","with","he","as","you","do","at","this","but"
+    "nunca","bueno","buena","gran","mucho","mucha","eh","ah","mm","verdad","claro"
   ]);
 
   // DOM
@@ -32,9 +34,6 @@
   const historyListEl = document.getElementById("historyList");
   const historySearchInput = document.getElementById("historySearchInput");
 
-  const groqApiKeyInput = document.getElementById("groqApiKeyInput");
-  const btnSaveApiKey = document.getElementById("btnSaveApiKey");
-
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("fileInput");
   const selectedFileBar = document.getElementById("selectedFileBar");
@@ -42,7 +41,6 @@
   const selectedFileSize = document.getElementById("selectedFileSize");
   const btnClearFile = document.getElementById("btnClearFile");
 
-  const languageSelect = document.getElementById("languageSelect");
   const btnStartTranscribe = document.getElementById("btnStartTranscribe");
 
   const progressCard = document.getElementById("progressCard");
@@ -118,27 +116,6 @@
     if (!query || !query.trim()) return safe;
     const escapedQ = query.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return safe.replace(new RegExp(`(${escapedQ})`, "gi"), '<mark class="search-hit">$1</mark>');
-  }
-
-  // API KEY MANAGEMENT
-  function initApiKey() {
-    const savedKey = localStorage.getItem("groq_api_key") || "";
-    if (groqApiKeyInput && savedKey) {
-      groqApiKeyInput.value = savedKey;
-    }
-  }
-
-  if (btnSaveApiKey) {
-    btnSaveApiKey.addEventListener("click", () => {
-      const k = (groqApiKeyInput.value || "").trim();
-      if (!k) {
-        localStorage.removeItem("groq_api_key");
-        showToast("Clave eliminada.");
-      } else {
-        localStorage.setItem("groq_api_key", k);
-        showToast("Clave guardada en tu navegador.");
-      }
-    });
   }
 
   // TEMA CLARO / OSCURO
@@ -271,7 +248,7 @@
   }
   if (btnClearFile) btnClearFile.addEventListener("click", clearSelectedFile);
 
-  // RESUMEN Y ANÁLISIS ALGORÍTMICO
+  // ANÁLISIS DE TEXTO Y RESUMEN (TF-IDF ALGORÍTMICO)
   function analyzeTranscriptText(segments, duration = 0) {
     const fullText = segments.map(s => s.text.trim()).join(" ");
     const words = fullText.split(/\s+/).filter(Boolean);
@@ -362,103 +339,156 @@
   }
 
   // =========================================================================
-  // TRANSCRIPCIÓN DIRECTA Y SILENCIOSA (GROQ WHISPER API - CLIENT-SIDE)
+  // DECODIFICACIÓN Y PROCESAMIENTO EN MEMORIA (SILENCIOSO CON AUDIO OFFLINE)
+  // =========================================================================
+  async function decodeAudioSilentlyToPCM16(file, onProgress) {
+    onProgress("Leyendo archivo en memoria...", 15);
+    const arrayBuffer = await file.arrayBuffer();
+
+    onProgress("Decodificando ondas acústicas (DSP)...", 30);
+    // Usamos OfflineAudioContext para NO reproducir sonido por los altavoces
+    const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+    tempCtx.close();
+
+    const sampleRate = 16000;
+    const duration = audioBuffer.duration;
+    const offlineCtx = new OfflineAudioContext(1, Math.ceil(duration * sampleRate), sampleRate);
+    const source = offlineCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(offlineCtx.destination);
+    source.start(0);
+
+    onProgress("Remuestreando a 16kHz mono para Kaldi...", 45);
+    const resampledBuffer = await offlineCtx.startRendering();
+    const channelData = resampledBuffer.getChannelData(0);
+
+    // Convertir Float32Array a Int16Array PCM
+    const pcmData = new Int16Array(channelData.length);
+    for (let i = 0; i < channelData.length; i++) {
+      const s = Math.max(-1, Math.min(1, channelData[i]));
+      pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    return { pcmData, duration, sampleRate };
+  }
+
+  // =========================================================================
+  // TRANSCRIPCIÓN CON KALDI / VOSK WEBASSEMBLY (CLIENT-SIDE Y SILENCIOSO)
   // =========================================================================
   if (btnStartTranscribe) {
     btnStartTranscribe.addEventListener("click", async () => {
       if (!currentFile) return;
 
-      const apiKey = (groqApiKeyInput.value || localStorage.getItem("groq_api_key") || "").trim();
-      if (!apiKey) {
-        alert("Por favor ingresa tu API Key gratuita de Groq arriba para transcribir el archivo en silencio a máxima velocidad.");
-        groqApiKeyInput.focus();
-        return;
-      }
-
       btnStartTranscribe.disabled = true;
       progressCard.classList.remove("hidden");
-      progressPct.textContent = "20%";
-      progressBarFill.style.width = "20%";
-      progressStatusTitle.textContent = "Enviando archivo de audio (Silencioso)...";
-      progressMessage.textContent = "Procesando fonemas con Whisper v3 en la nube...";
-
-      const formData = new FormData();
-      formData.append("file", currentFile);
-      formData.append("model", "whisper-large-v3-turbo");
-      formData.append("response_format", "verbose_json");
-      formData.append("language", languageSelect ? languageSelect.value : "es");
+      progressPct.textContent = "10%";
+      progressBarFill.style.width = "10%";
+      progressStatusTitle.textContent = "Iniciando motor algorítmico Kaldi...";
+      progressMessage.textContent = "Preparando WebAssembly en memoria...";
 
       try {
-        progressPct.textContent = "50%";
-        progressBarFill.style.width = "50%";
+        const { pcmData, duration, sampleRate } = await decodeAudioSilentlyToPCM16(
+          currentFile,
+          (msg, pct) => {
+            progressStatusTitle.textContent = msg;
+            progressPct.textContent = `${pct}%`;
+            progressBarFill.style.width = `${pct}%`;
+          }
+        );
 
-        const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${apiKey}`
-          },
-          body: formData
-        });
+        progressStatusTitle.textContent = "Cargando diccionario fonético Kaldi Wasm...";
+        progressPct.textContent = "55%";
+        progressBarFill.style.width = "55%";
+        progressMessage.textContent = "Si es la primera vez, se descarga el modelo en español (~40 MB)...";
 
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error?.message || "Error al procesar con el motor Whisper.");
+        // Cargar Vosk Wasm
+        if (!loadedVoskModel && window.Vosk) {
+          try {
+            loadedVoskModel = await Vosk.createModel(VOSK_ES_MODEL_URL);
+          } catch (modelErr) {
+            console.warn("Error cargando modelo remoto de Vosk:", modelErr);
+          }
         }
 
-        progressPct.textContent = "90%";
-        progressBarFill.style.width = "90%";
-        progressMessage.textContent = "Estructurando párrafos y resumen ejecutivo...";
+        const segments = [];
+        let segId = 1;
 
-        const data = await res.json();
-        const duration = data.duration || 60;
-        const rawSegments = data.segments || [];
+        if (loadedVoskModel) {
+          progressStatusTitle.textContent = "Decodificando fonemas con Kaldi en WebAssembly...";
+          const recognizer = new loadedVoskModel.KaldiRecognizer(sampleRate);
+          recognizer.setWords(true);
 
-        const segments = rawSegments.map((s, idx) => ({
-          id: idx + 1,
-          start: Math.round(s.start * 10) / 10,
-          end: Math.round(s.end * 10) / 10,
-          timestamp: formatTimestamp(s.start),
-          text: s.text.trim()
-        }));
+          const chunkSize = sampleRate * 2; // Bloques de 2 segundos
+          for (let i = 0; i < pcmData.length; i += chunkSize) {
+            const chunk = pcmData.subarray(i, i + chunkSize);
+            if (recognizer.acceptWaveform(chunk)) {
+              const res = recognizer.result();
+              if (res && res.text && res.text.trim()) {
+                const startSec = Math.round((i / sampleRate) * 10) / 10;
+                const endSec = Math.round(Math.min(duration, (i + chunkSize) / sampleRate) * 10) / 10;
+                segments.push({
+                  id: segId++,
+                  start: startSec,
+                  end: endSec,
+                  timestamp: formatTimestamp(startSec),
+                  text: res.text.trim().charAt(0).toUpperCase() + res.text.trim().slice(1) + "."
+                });
+              }
+            }
+            const curPct = Math.min(95, 55 + Math.round((i / pcmData.length) * 40));
+            progressPct.textContent = `${curPct}%`;
+            progressBarFill.style.width = `${curPct}%`;
+            progressMessage.textContent = `Procesando muestras [${formatTimestamp(i / sampleRate)} / ${formatTimestamp(duration)}]...`;
+          }
 
-        // Si no vinieron segmentos individuales, usar el texto completo
-        if (segments.length === 0 && data.text) {
-          segments.push({
-            id: 1,
-            start: 0,
-            end: Math.round(duration),
-            timestamp: "00:00",
-            text: data.text.trim()
-          });
+          const finalRes = recognizer.finalResult();
+          if (finalRes && finalRes.text && finalRes.text.trim()) {
+            const lastStart = segments.length > 0 ? segments[segments.length - 1].end : 0;
+            segments.push({
+              id: segId++,
+              start: lastStart,
+              end: Math.round(duration * 10) / 10,
+              timestamp: formatTimestamp(lastStart),
+              text: finalRes.text.trim().charAt(0).toUpperCase() + finalRes.text.trim().slice(1) + "."
+            });
+          }
+          recognizer.free();
+        } else {
+          // Fallback informativo si el navegador bloquea la descarga del zip de Vosk por CORS
+          throw new Error("No se pudo cargar el diccionario de Vosk en el navegador. Recuerda que puedes descargar el archivo 'iniciar.bat' desde la barra lateral izquierda para ejecutar Kaldi en tu PC sin límites.");
         }
-
-        const analysis = analyzeTranscriptText(segments, duration);
-        const newItem = {
-          id: "trans_" + Date.now(),
-          title: currentFile.name.replace(/\.[^/.]+$/, ""),
-          duration: duration,
-          duration_formatted: formatTimestamp(duration),
-          word_count: analysis.stats.word_count,
-          language_name: languageSelect ? languageSelect.options[languageSelect.selectedIndex].text : "Español",
-          segments,
-          analysis
-        };
 
         progressPct.textContent = "100%";
         progressBarFill.style.width = "100%";
+        progressStatusTitle.textContent = "Transcripción completada.";
+        progressMessage.textContent = "Generando resumen algorítmico y modo lectura...";
 
         setTimeout(() => {
           progressCard.classList.add("hidden");
           btnStartTranscribe.disabled = false;
           clearSelectedFile();
+
+          const analysis = analyzeTranscriptText(segments, duration);
+          const newItem = {
+            id: "trans_" + Date.now(),
+            title: currentFile.name.replace(/\.[^/.]+$/, ""),
+            duration: duration,
+            duration_formatted: formatTimestamp(duration),
+            word_count: analysis.stats.word_count,
+            language_name: "Español",
+            segments,
+            analysis
+          };
+
           historyItems.unshift(newItem);
           saveLocalHistory();
           openItem(newItem);
-          showToast("Transcripción completada.");
+          showToast("Transcripción lista.");
         }, 500);
 
       } catch (err) {
-        showToast(err.message, 5000);
+        showToast(err.message, 6000);
         btnStartTranscribe.disabled = false;
         progressCard.classList.add("hidden");
       }
@@ -752,6 +782,5 @@
   }
 
   initTheme();
-  initApiKey();
   loadLocalHistory();
 })();

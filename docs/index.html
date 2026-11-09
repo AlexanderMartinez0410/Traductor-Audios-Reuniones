@@ -3,11 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Audio Escrito — Vercel Style</title>
+  <title>Audio Escrito — Algoritmo Acústico Kaldi</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <!-- Motor C++ Kaldi compilado a WebAssembly -->
+  <script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -23,7 +25,7 @@
           </div>
           <div>
             <h1 class="brand-title">Audio Escrito</h1>
-            <span class="brand-subtitle">Transcriptor</span>
+            <span class="brand-subtitle">Algorítmico • Wasm</span>
           </div>
         </div>
       </div>
@@ -32,6 +34,13 @@
         <button class="btn btn-primary btn-block" id="btnNewTranscription">
           Nueva Transcripción
         </button>
+      </div>
+
+      <!-- BOTÓN PARA DESCARGAR EL .BAT DIRECTAMENTE -->
+      <div style="padding: 0 16px 8px;">
+        <a href="iniciar-local.bat" download="iniciar-audio-escrito.bat" class="btn btn-secondary btn-block btn-sm" style="text-decoration: none;">
+          Descargar iniciar.bat
+        </a>
       </div>
 
       <div class="sidebar-search">
@@ -45,7 +54,7 @@
         <button class="btn btn-ghost btn-sm" id="btnThemeToggle" title="Cambiar tema">
           <span id="themeLabel">Tema</span>
         </button>
-        <span class="local-badge">Ultra-Fast Whisper API</span>
+        <span class="local-badge">Kaldi Wasm • Sin IA</span>
       </div>
     </aside>
 
@@ -55,21 +64,16 @@
       <section class="view-section" id="uploadView">
         <div class="upload-container">
           <div class="upload-hero">
-            <h2>Transcriptor de Reuniones</h2>
-            <p>Sube tu audio o video y obtén el texto transcrito de inmediato a máxima velocidad sin reproducir nada en tus altavoces.</p>
+            <h2>Transcriptor Algorítmico de Reuniones</h2>
+            <p>100% basado en procesamiento digital de señales (DSP) y Modelos de Markov de la librería Kaldi en WebAssembly. Funciona en silencio total sin reproducir audio en tus altavoces.</p>
           </div>
 
-          <!-- Configuración de API Key Groq (Gratuita) -->
-          <div class="api-key-box" id="apiKeyBox">
-            <div class="api-key-header">
-              <label for="groqApiKeyInput">Groq API Key (Gratuita - Transcribe archivos de 10 min en ~3 segundos sin reproducir sonido)</label>
-              <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="link-external">Obtener clave gratuita</a>
+          <!-- Banner Informativo -->
+          <div class="api-key-box" style="margin-bottom: 16px;">
+            <div style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
+              <strong style="color: var(--text-primary);">Modo 100% Algorítmico (Sin IA):</strong>
+              La primera vez se cargará el diccionario fonético en español en la memoria de tu navegador (~40 MB). Luego queda guardado y funciona de forma instantánea y offline.
             </div>
-            <div class="api-key-input-row">
-              <input type="password" id="groqApiKeyInput" placeholder="gsk_..." autocomplete="off" />
-              <button class="btn btn-secondary btn-sm" id="btnSaveApiKey">Guardar Clave</button>
-            </div>
-            <span class="api-key-hint">Tu clave se guarda únicamente en el localStorage de tu navegador. Si no tienes una, créala gratis en console.groq.com.</span>
           </div>
 
           <!-- Zona Drag & Drop -->
@@ -78,7 +82,7 @@
             <h3 id="dropzoneTitle">Arrastra tu archivo aquí</h3>
             <p class="dropzone-sub" id="dropzoneSub">o haz clic para seleccionar de tu equipo</p>
             <div class="supported-formats">
-              <span class="format-pill">MP3, WAV, M4A, OGG, WEBM</span>
+              <span class="format-pill">WAV, MP3, M4A, OGG, WEBM</span>
               <span class="format-pill">MP4, WEBM, MOV, MKV</span>
             </div>
           </div>
@@ -95,21 +99,16 @@
           <!-- Opciones -->
           <div class="options-grid">
             <div class="form-group">
-              <label for="languageSelect">Idioma Principal</label>
+              <label for="languageSelect">Diccionario Fonético</label>
               <select id="languageSelect" class="form-select">
-                <option value="es" selected>Español</option>
-                <option value="en">English</option>
-                <option value="pt">Português</option>
-                <option value="fr">Français</option>
-                <option value="it">Italiano</option>
-                <option value="de">Deutsch</option>
+                <option value="es" selected>Español (Modelo Vosk / Kaldi Small)</option>
               </select>
             </div>
           </div>
 
           <div class="submit-row">
             <button class="btn btn-primary btn-lg" id="btnStartTranscribe" disabled>
-              Transcribir a Máxima Velocidad (Silencioso)
+              Transcribir con Kaldi (Silencioso en Memoria)
             </button>
           </div>
 
@@ -118,14 +117,14 @@
             <div class="progress-header">
               <div class="progress-title-wrap">
                 <span class="spinner"></span>
-                <strong id="progressStatusTitle">Enviando audio al motor ultrarrápido...</strong>
+                <strong id="progressStatusTitle">Decodificando señal de audio en memoria...</strong>
               </div>
               <span class="progress-pct" id="progressPct">0%</span>
             </div>
             <div class="progress-bar-track">
               <div class="progress-bar-fill" id="progressBarFill" style="width: 0%"></div>
             </div>
-            <p class="progress-message" id="progressMessage">Procesando fonemas sin reproducir audio...</p>
+            <p class="progress-message" id="progressMessage">Procesando muestras PCM con WebAssembly...</p>
           </div>
         </div>
       </section>
