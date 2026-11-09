@@ -11,7 +11,8 @@
   let segmentsModified = false;
   let loadedVoskModel = null;
 
-  const VOSK_ES_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
+  // Modelo alojado en el mismo dominio de GitHub Pages (CORS 100% libre)
+  const VOSK_ES_MODEL_URL = "models/vosk-model-small-es-0.42.zip";
 
   const STOPWORDS = new Set([
     "el","la","los","las","un","una","unos","unas","lo","al","del","de","en","por","para","con","sin",
