@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audio Escrito — Vercel Style</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-layout">
+    <!-- BARRA LATERAL -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="vercel-triangle">
+            <svg viewBox="0 0 76 65" height="18" width="20">
+              <path d="M37.5274 0L75.0548 65H0L37.5274 0Z" />
+            </svg>
+          </div>
+          <div>
+            <h1 class="brand-title">Audio Escrito</h1>
+            <span class="brand-subtitle">Transcriptor</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="btn btn-primary btn-block" id="btnNewTranscription">
+          Nueva Transcripción
+        </button>
+      </div>
+
+      <div class="sidebar-search">
+        <input type="text" id="historySearchInput" placeholder="Buscar en biblioteca..." />
+      </div>
+
+      <div class="sidebar-section-label">Biblioteca</div>
+      <div class="history-list" id="historyList"></div>
+
+      <div class="sidebar-footer">
+        <button class="btn btn-ghost btn-sm" id="btnThemeToggle" title="Cambiar tema">
+          <span id="themeLabel">Tema</span>
+        </button>
+        <span class="local-badge">Client-Side</span>
+      </div>
+    </aside>
+
+    <!-- ÁREA PRINCIPAL -->
+    <main class="main-content">
+      <!-- VISTA SUBIR ARCHIVO -->
+      <section class="view-section" id="uploadView">
+        <div class="upload-container">
+          <div class="upload-hero">
+            <h2>Transcriptor de Reuniones</h2>
+            <p>Convierte audios o videos en texto estructurado con marcas de tiempo, lector sincronizado y resumen algorítmico.</p>
+          </div>
+
+          <!-- Zona Drag & Drop -->
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.flac,.aac,.opus,.webm,.mp4,.mkv,.mov" hidden />
+            <h3 id="dropzoneTitle">Arrastra tu archivo aquí</h3>
+            <p class="dropzone-sub" id="dropzoneSub">o haz clic para seleccionar de tu equipo</p>
+            <div class="supported-formats">
+              <span class="format-pill">MP3, WAV, M4A, OGG, WEBM</span>
+              <span class="format-pill">MP4, WEBM, MOV, MKV</span>
+            </div>
+          </div>
+
+          <!-- Archivo seleccionado -->
+          <div class="selected-file-bar hidden" id="selectedFileBar">
+            <div class="file-info">
+              <div class="file-name" id="selectedFileName">archivo.mp3</div>
+              <div class="file-size" id="selectedFileSize">0 MB</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="btnClearFile">Cambiar</button>
+          </div>
+
+          <!-- Grabadora en vivo -->
+          <div class="recorder-box">
+            <div class="recorder-left">
+              <span class="mic-dot" id="micDot"></span>
+              <span id="recorderStatusText">Micrófono en vivo</span>
+              <span class="recorder-timer hidden" id="recorderTimer">00:00</span>
+            </div>
+            <div class="recorder-actions">
+              <button class="btn btn-secondary btn-sm" id="btnLiveSpeech">Transcribir en Vivo</button>
+              <button class="btn btn-danger btn-sm hidden" id="btnStopLiveSpeech">Finalizar</button>
+            </div>
+          </div>
+
+          <!-- Opciones -->
+          <div class="options-grid">
+            <div class="form-group">
+              <label for="languageSelect">Idioma</label>
+              <select id="languageSelect" class="form-select">
+                <option value="es-ES" selected>Español</option>
+                <option value="en-US">English</option>
+                <option value="pt-BR">Português</option>
+                <option value="fr-FR">Français</option>
+                <option value="it-IT">Italiano</option>
+                <option value="de-DE">Deutsch</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="speedModeSelect">Velocidad</label>
+              <select id="speedModeSelect" class="form-select">
+                <option value="1.0" selected>1.0x (Normal)</option>
+                <option value="1.5">1.5x (Rápida)</option>
+                <option value="2.0">2.0x (Turbo)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="submit-row">
+            <button class="btn btn-primary btn-lg" id="btnStartTranscribe" disabled>
+              Iniciar Transcripción
+            </button>
+          </div>
+
+          <!-- Progreso -->
+          <div class="progress-card hidden" id="progressCard">
+            <div class="progress-header">
+              <div class="progress-title-wrap">
+                <span class="spinner"></span>
+                <strong id="progressStatusTitle">Decodificando audio...</strong>
+              </div>
+              <span class="progress-pct" id="progressPct">0%</span>
+            </div>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" id="progressBarFill" style="width: 0%"></div>
+            </div>
+            <p class="progress-message" id="progressMessage">Preparando reconocimiento acústico...</p>
+            <div class="live-preview-box hidden" id="livePreviewBox">
+              <span class="live-tag">LIVE</span>
+              <p id="livePreviewText">...</p>
+            </div>
+            <div style="margin-top: 12px; text-align: right;">
+              <button class="btn btn-outline btn-xs" id="btnCancelTranscribe">Detener y Ver</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VISTA LECTOR -->
+      <section class="view-section hidden" id="readerView">
+        <header class="reader-header">
+          <div class="reader-title-block">
+            <div class="title-edit-row">
+              <h2 class="doc-title" id="docTitle" contenteditable="true" spellcheck="false" title="Haz clic para editar">Reunión</h2>
+            </div>
+            <div class="doc-meta-badges">
+              <span class="meta-badge" id="metaLanguage">Español</span>
+              <span class="meta-badge" id="metaDuration">00:00</span>
+              <span class="meta-badge" id="metaWords">0 palabras</span>
+              <span class="meta-badge" id="metaReadingTime">~1 min</span>
+            </div>
+          </div>
+
+          <!-- Exportar -->
+          <div class="export-toolbar">
+            <label class="timestamp-check">
+              <input type="checkbox" id="chkExportTimestamps" checked />
+              <span>Timestamps</span>
+            </label>
+            <div class="export-buttons">
+              <button class="btn btn-outline btn-sm" id="btnExportTxt">TXT</button>
+              <button class="btn btn-outline btn-sm" id="btnExportSrt">SRT</button>
+              <button class="btn btn-outline btn-sm" id="btnExportDoc">Word</button>
+              <button class="btn btn-outline btn-sm" id="btnExportPdf">PDF</button>
+            </div>
+          </div>
+        </header>
+
+        <!-- Reproductor -->
+        <div class="media-player-card" id="mediaPlayerCard">
+          <div class="video-wrapper hidden" id="videoWrapper">
+            <video id="videoPlayer" controls preload="metadata"></video>
+          </div>
+          <div class="audio-wrapper" id="audioWrapper">
+            <audio id="audioPlayer" controls preload="metadata"></audio>
+          </div>
+          <div class="player-controls-bar">
+            <div class="player-quick-btns">
+              <button class="btn btn-ghost btn-xs" id="btnRewind5">-5s</button>
+              <button class="btn btn-ghost btn-xs" id="btnForward5">+5s</button>
+              <span class="player-hint">Haz clic en cualquier timestamp para sincronizar</span>
+            </div>
+            <div class="player-right-controls">
+              <label class="autoscroll-toggle">
+                <input type="checkbox" id="chkAutoScroll" checked />
+                <span>Auto-scroll</span>
+              </label>
+              <select id="playbackSpeedSelect" class="speed-select">
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1.0x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2.0x</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub-barra -->
+        <div class="reader-Subbar">
+          <div class="view-tabs" role="tablist">
+            <button class="tab-btn active" data-tab="paragraphs">Lectura</button>
+            <button class="tab-btn" data-tab="segments">Fragmentos</button>
+            <button class="tab-btn" data-tab="summary">Resumen</button>
+          </div>
+
+          <div class="reader-tools">
+            <div class="search-in-text">
+              <input type="text" id="transcriptSearchInput" placeholder="Buscar..." />
+              <span class="search-count hidden" id="searchCountBadge">0</span>
+            </div>
+            <div class="font-controls">
+              <button class="btn btn-ghost btn-xs" id="btnFontDec">A-</button>
+              <button class="btn btn-ghost btn-xs" id="btnFontInc">A+</button>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btnCopyAll">Copiar</button>
+          </div>
+        </div>
+
+        <!-- Cuerpo del Lector -->
+        <div class="reader-body" id="readerBody">
+          <div class="tab-pane active" id="tabParagraphs">
+            <article class="reading-paper" id="paragraphsContainer"></article>
+          </div>
+
+          <div class="tab-pane hidden" id="tabSegments">
+            <div class="segments-toolbar">
+              <span>Haz clic en [MM:SS] o edita directamente:</span>
+              <button class="btn btn-primary btn-sm hidden" id="btnSaveSegmentEdits">Guardar</button>
+            </div>
+            <div class="segments-list" id="segmentsContainer"></div>
+          </div>
+
+          <div class="tab-pane hidden" id="tabSummary">
+            <div class="summary-grid">
+              <div class="summary-card full-width">
+                <div class="card-header-row">
+                  <h3>Resumen Ejecutivo</h3>
+                  <button class="btn btn-ghost btn-xs" id="btnCopySummary">Copiar</button>
+                </div>
+                <p class="summary-paragraph" id="summaryText"></p>
+              </div>
+
+              <div class="summary-card">
+                <h3>Puntos Clave</h3>
+                <p class="card-sub">Intervenciones principales detectadas.</p>
+                <ul class="keypoints-list" id="keyPointsList"></ul>
+              </div>
+
+              <div class="summary-card">
+                <h3>Términos Frecuentes</h3>
+                <div class="keywords-cloud" id="keywordsCloud"></div>
+
+                <div id="questionsBlock" class="mt-20 hidden">
+                  <h3>Preguntas</h3>
+                  <ul class="keypoints-list" id="questionsList"></ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

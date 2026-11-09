@@ -1,0 +1,11 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+SpeechRecognition>=3.10.0
+vosk>=0.3.45
+faster-whisper>=1.1.0
+python-docx>=1.1.0
+fpdf2>=2.7.8
+deep-translator>=1.11.4
+numpy>=1.26.0
+av>=11.0.0
