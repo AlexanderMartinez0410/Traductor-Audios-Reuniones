@@ -1128,3 +1128,62 @@ mark.search-hit {
   font-weight: 500;
   z-index: 9999;
 }
+
+/* API KEY BOX VERCEL STYLE */
+.api-key-box {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.api-key-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.api-key-header label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.link-external {
+  font-size: 0.74rem;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.api-key-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.api-key-input-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.api-key-input-row input:focus {
+  border-color: var(--border-focus);
+}
+
+.api-key-hint {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}

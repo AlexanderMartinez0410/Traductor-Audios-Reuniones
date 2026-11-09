@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Audio Escrito — Vercel Style</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -42,7 +45,7 @@
         <button class="btn btn-ghost btn-sm" id="btnThemeToggle" title="Cambiar tema">
           <span id="themeLabel">Tema</span>
         </button>
-        <span class="local-badge">Client-Side</span>
+        <span class="local-badge">Ultra-Fast Whisper API</span>
       </div>
     </aside>
 
@@ -53,7 +56,20 @@
         <div class="upload-container">
           <div class="upload-hero">
             <h2>Transcriptor de Reuniones</h2>
-            <p>Convierte audios o videos en texto estructurado con marcas de tiempo, lector sincronizado y resumen algorítmico.</p>
+            <p>Sube tu audio o video y obtén el texto transcrito de inmediato a máxima velocidad sin reproducir nada en tus altavoces.</p>
+          </div>
+
+          <!-- Configuración de API Key Groq (Gratuita) -->
+          <div class="api-key-box" id="apiKeyBox">
+            <div class="api-key-header">
+              <label for="groqApiKeyInput">Groq API Key (Gratuita - Transcribe archivos de 10 min en ~3 segundos sin reproducir sonido)</label>
+              <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="link-external">Obtener clave gratuita</a>
+            </div>
+            <div class="api-key-input-row">
+              <input type="password" id="groqApiKeyInput" placeholder="gsk_..." autocomplete="off" />
+              <button class="btn btn-secondary btn-sm" id="btnSaveApiKey">Guardar Clave</button>
+            </div>
+            <span class="api-key-hint">Tu clave se guarda únicamente en el localStorage de tu navegador. Si no tienes una, créala gratis en console.groq.com.</span>
           </div>
 
           <!-- Zona Drag & Drop -->
@@ -76,46 +92,24 @@
             <button class="btn btn-ghost btn-sm" id="btnClearFile">Cambiar</button>
           </div>
 
-          <!-- Grabadora en vivo -->
-          <div class="recorder-box">
-            <div class="recorder-left">
-              <span class="mic-dot" id="micDot"></span>
-              <span id="recorderStatusText">Micrófono en vivo</span>
-              <span class="recorder-timer hidden" id="recorderTimer">00:00</span>
-            </div>
-            <div class="recorder-actions">
-              <button class="btn btn-secondary btn-sm" id="btnLiveSpeech">Transcribir en Vivo</button>
-              <button class="btn btn-danger btn-sm hidden" id="btnStopLiveSpeech">Finalizar</button>
-            </div>
-          </div>
-
           <!-- Opciones -->
           <div class="options-grid">
             <div class="form-group">
-              <label for="languageSelect">Idioma</label>
+              <label for="languageSelect">Idioma Principal</label>
               <select id="languageSelect" class="form-select">
-                <option value="es-ES" selected>Español</option>
-                <option value="en-US">English</option>
-                <option value="pt-BR">Português</option>
-                <option value="fr-FR">Français</option>
-                <option value="it-IT">Italiano</option>
-                <option value="de-DE">Deutsch</option>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label for="speedModeSelect">Velocidad</label>
-              <select id="speedModeSelect" class="form-select">
-                <option value="1.0" selected>1.0x (Normal)</option>
-                <option value="1.5">1.5x (Rápida)</option>
-                <option value="2.0">2.0x (Turbo)</option>
+                <option value="es" selected>Español</option>
+                <option value="en">English</option>
+                <option value="pt">Português</option>
+                <option value="fr">Français</option>
+                <option value="it">Italiano</option>
+                <option value="de">Deutsch</option>
               </select>
             </div>
           </div>
 
           <div class="submit-row">
             <button class="btn btn-primary btn-lg" id="btnStartTranscribe" disabled>
-              Iniciar Transcripción
+              Transcribir a Máxima Velocidad (Silencioso)
             </button>
           </div>
 
@@ -124,21 +118,14 @@
             <div class="progress-header">
               <div class="progress-title-wrap">
                 <span class="spinner"></span>
-                <strong id="progressStatusTitle">Decodificando audio...</strong>
+                <strong id="progressStatusTitle">Enviando audio al motor ultrarrápido...</strong>
               </div>
               <span class="progress-pct" id="progressPct">0%</span>
             </div>
             <div class="progress-bar-track">
               <div class="progress-bar-fill" id="progressBarFill" style="width: 0%"></div>
             </div>
-            <p class="progress-message" id="progressMessage">Preparando reconocimiento acústico...</p>
-            <div class="live-preview-box hidden" id="livePreviewBox">
-              <span class="live-tag">LIVE</span>
-              <p id="livePreviewText">...</p>
-            </div>
-            <div style="margin-top: 12px; text-align: right;">
-              <button class="btn btn-outline btn-xs" id="btnCancelTranscribe">Detener y Ver</button>
-            </div>
+            <p class="progress-message" id="progressMessage">Procesando fonemas sin reproducir audio...</p>
           </div>
         </div>
       </section>
@@ -173,36 +160,6 @@
           </div>
         </header>
 
-        <!-- Reproductor -->
-        <div class="media-player-card" id="mediaPlayerCard">
-          <div class="video-wrapper hidden" id="videoWrapper">
-            <video id="videoPlayer" controls preload="metadata"></video>
-          </div>
-          <div class="audio-wrapper" id="audioWrapper">
-            <audio id="audioPlayer" controls preload="metadata"></audio>
-          </div>
-          <div class="player-controls-bar">
-            <div class="player-quick-btns">
-              <button class="btn btn-ghost btn-xs" id="btnRewind5">-5s</button>
-              <button class="btn btn-ghost btn-xs" id="btnForward5">+5s</button>
-              <span class="player-hint">Haz clic en cualquier timestamp para sincronizar</span>
-            </div>
-            <div class="player-right-controls">
-              <label class="autoscroll-toggle">
-                <input type="checkbox" id="chkAutoScroll" checked />
-                <span>Auto-scroll</span>
-              </label>
-              <select id="playbackSpeedSelect" class="speed-select">
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1.0x</option>
-                <option value="1.25">1.25x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2.0x</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
         <!-- Sub-barra -->
         <div class="reader-Subbar">
           <div class="view-tabs" role="tablist">
@@ -232,7 +189,7 @@
 
           <div class="tab-pane hidden" id="tabSegments">
             <div class="segments-toolbar">
-              <span>Haz clic en [MM:SS] o edita directamente:</span>
+              <span>Marcas de tiempo exactas:</span>
               <button class="btn btn-primary btn-sm hidden" id="btnSaveSegmentEdits">Guardar</button>
             </div>
             <div class="segments-list" id="segmentsContainer"></div>

@@ -1,18 +1,14 @@
 (() => {
   // =========================================================================
-  // SISTEMA AUDIO ESCRITO — CLIENT-SIDE ENGINE PARA GITHUB PAGES
-  // 100% en el navegador (Web Audio API + Speech Recognition nativo)
-  // Sin servidores backend, sin peticiones POST a /api (Costo $0)
+  // SISTEMA AUDIO ESCRITO — CLIENT-SIDE (SILENCIOSO Y ULTRARRÁPIDO)
+  // Sin reproducción de audio. Transcribe 10 min en ~3s vía API directa.
   // =========================================================================
 
   let currentFile = null;
-  let currentObjectUrl = null;
   let currentItem = null;
   let historyItems = [];
-  let isProcessing = false;
-  let recognitionInstance = null;
-  let segmentsModified = false;
   let readerFontSize = 1.05;
+  let segmentsModified = false;
 
   const STOPWORDS = new Set([
     "el","la","los","las","un","una","unos","unas","lo","al","del","de","en","por","para","con","sin",
@@ -29,12 +25,15 @@
     "and","a","in","that","have","i","it","for","not","on","with","he","as","you","do","at","this","but"
   ]);
 
-  // DOM Upload
+  // DOM
   const uploadView = document.getElementById("uploadView");
   const readerView = document.getElementById("readerView");
   const btnNewTranscription = document.getElementById("btnNewTranscription");
   const historyListEl = document.getElementById("historyList");
   const historySearchInput = document.getElementById("historySearchInput");
+
+  const groqApiKeyInput = document.getElementById("groqApiKeyInput");
+  const btnSaveApiKey = document.getElementById("btnSaveApiKey");
 
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("fileInput");
@@ -43,14 +42,7 @@
   const selectedFileSize = document.getElementById("selectedFileSize");
   const btnClearFile = document.getElementById("btnClearFile");
 
-  const btnLiveSpeech = document.getElementById("btnLiveSpeech");
-  const btnStopLiveSpeech = document.getElementById("btnStopLiveSpeech");
-  const micDot = document.getElementById("micDot");
-  const recorderStatusText = document.getElementById("recorderStatusText");
-  const recorderTimer = document.getElementById("recorderTimer");
-
   const languageSelect = document.getElementById("languageSelect");
-  const speedModeSelect = document.getElementById("speedModeSelect");
   const btnStartTranscribe = document.getElementById("btnStartTranscribe");
 
   const progressCard = document.getElementById("progressCard");
@@ -58,9 +50,6 @@
   const progressPct = document.getElementById("progressPct");
   const progressBarFill = document.getElementById("progressBarFill");
   const progressMessage = document.getElementById("progressMessage");
-  const livePreviewBox = document.getElementById("livePreviewBox");
-  const livePreviewText = document.getElementById("livePreviewText");
-  const btnCancelTranscribe = document.getElementById("btnCancelTranscribe");
 
   // DOM Lector
   const docTitle = document.getElementById("docTitle");
@@ -74,15 +63,6 @@
   const btnExportSrt = document.getElementById("btnExportSrt");
   const btnExportDoc = document.getElementById("btnExportDoc");
   const btnExportPdf = document.getElementById("btnExportPdf");
-
-  const videoWrapper = document.getElementById("videoWrapper");
-  const audioWrapper = document.getElementById("audioWrapper");
-  const videoPlayer = document.getElementById("videoPlayer");
-  const audioPlayer = document.getElementById("audioPlayer");
-  const btnRewind5 = document.getElementById("btnRewind5");
-  const btnForward5 = document.getElementById("btnForward5");
-  const chkAutoScroll = document.getElementById("chkAutoScroll");
-  const playbackSpeedSelect = document.getElementById("playbackSpeedSelect");
 
   const transcriptSearchInput = document.getElementById("transcriptSearchInput");
   const searchCountBadge = document.getElementById("searchCountBadge");
@@ -140,23 +120,28 @@
     return safe.replace(new RegExp(`(${escapedQ})`, "gi"), '<mark class="search-hit">$1</mark>');
   }
 
-  function getActivePlayer() {
-    return (currentItem && currentItem.media_type === "video") ? videoPlayer : audioPlayer;
-  }
-
-  function pauseAllPlayers() {
-    try { videoPlayer.pause(); audioPlayer.pause(); } catch (_) {}
-  }
-
-  function seekToSeconds(sec) {
-    const p = getActivePlayer();
-    if (p) {
-      p.currentTime = Math.max(0, Number(sec) || 0);
-      p.play().catch(() => {});
+  // API KEY MANAGEMENT
+  function initApiKey() {
+    const savedKey = localStorage.getItem("groq_api_key") || "";
+    if (groqApiKeyInput && savedKey) {
+      groqApiKeyInput.value = savedKey;
     }
   }
 
-  // TEMA CLARO / OSCURO (VERCEL STYLE)
+  if (btnSaveApiKey) {
+    btnSaveApiKey.addEventListener("click", () => {
+      const k = (groqApiKeyInput.value || "").trim();
+      if (!k) {
+        localStorage.removeItem("groq_api_key");
+        showToast("Clave eliminada.");
+      } else {
+        localStorage.setItem("groq_api_key", k);
+        showToast("Clave guardada en tu navegador.");
+      }
+    });
+  }
+
+  // TEMA CLARO / OSCURO
   function initTheme() {
     const saved = localStorage.getItem("audio_escrito_theme") || "dark";
     setTheme(saved);
@@ -173,7 +158,7 @@
     });
   }
 
-  // HISTORIAL LOCALSTORAGE (100% CLIENT-SIDE)
+  // HISTORIAL LOCAL
   function loadLocalHistory() {
     try {
       historyItems = JSON.parse(localStorage.getItem("audio_escrito_history") || "[]");
@@ -199,7 +184,7 @@
     });
 
     if (filtered.length === 0) {
-      historyListEl.innerHTML = `<div class="empty-history">Sin transcripciones guardadas en este navegador.</div>`;
+      historyListEl.innerHTML = `<div class="empty-history">Sin transcripciones aún.</div>`;
       return;
     }
 
@@ -244,7 +229,6 @@
   if (historySearchInput) historySearchInput.addEventListener("input", renderHistoryList);
 
   function showUploadView() {
-    pauseAllPlayers();
     currentItem = null;
     readerView.classList.add("hidden");
     uploadView.classList.remove("hidden");
@@ -256,9 +240,6 @@
   function handleFileSelected(file) {
     if (!file) return;
     currentFile = file;
-    if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-    currentObjectUrl = URL.createObjectURL(file);
-
     if (selectedFileName) selectedFileName.textContent = file.name;
     if (selectedFileSize) selectedFileSize.textContent = formatBytes(file.size);
 
@@ -270,10 +251,6 @@
   function clearSelectedFile() {
     currentFile = null;
     if (fileInput) fileInput.value = "";
-    if (currentObjectUrl) {
-      URL.revokeObjectURL(currentObjectUrl);
-      currentObjectUrl = null;
-    }
     selectedFileBar.classList.add("hidden");
     dropzone.classList.remove("hidden");
     btnStartTranscribe.disabled = true;
@@ -294,9 +271,7 @@
   }
   if (btnClearFile) btnClearFile.addEventListener("click", clearSelectedFile);
 
-  // =========================================================================
-  // ALGORITMOS DE TEXTO Y RESUMEN (TF-IDF CLIENT-SIDE)
-  // =========================================================================
+  // RESUMEN Y ANÁLISIS ALGORÍTMICO
   function analyzeTranscriptText(segments, duration = 0) {
     const fullText = segments.map(s => s.text.trim()).join(" ");
     const words = fullText.split(/\s+/).filter(Boolean);
@@ -387,223 +362,113 @@
   }
 
   // =========================================================================
-  // TRANSCRIPCIÓN CLIENT-SIDE DIRECTA EN EL NAVEGADOR
+  // TRANSCRIPCIÓN DIRECTA Y SILENCIOSA (GROQ WHISPER API - CLIENT-SIDE)
   // =========================================================================
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
   if (btnStartTranscribe) {
     btnStartTranscribe.addEventListener("click", async () => {
-      if (!currentFile || !currentObjectUrl) return;
+      if (!currentFile) return;
 
-      if (!SpeechRecognition) {
-        alert("Tu navegador no soporta Speech Recognition nativo. Por favor abre este enlace en Google Chrome, Microsoft Edge, Brave u Opera.");
+      const apiKey = (groqApiKeyInput.value || localStorage.getItem("groq_api_key") || "").trim();
+      if (!apiKey) {
+        alert("Por favor ingresa tu API Key gratuita de Groq arriba para transcribir el archivo en silencio a máxima velocidad.");
+        groqApiKeyInput.focus();
         return;
       }
 
-      isProcessing = true;
       btnStartTranscribe.disabled = true;
       progressCard.classList.remove("hidden");
-      progressPct.textContent = "5%";
-      progressBarFill.style.width = "5%";
-      progressStatusTitle.textContent = "Analizando audio en el navegador...";
-      progressMessage.textContent = "Iniciando reconocimiento fonético...";
-      livePreviewBox.classList.add("hidden");
+      progressPct.textContent = "20%";
+      progressBarFill.style.width = "20%";
+      progressStatusTitle.textContent = "Enviando archivo de audio (Silencioso)...";
+      progressMessage.textContent = "Procesando fonemas con Whisper v3 en la nube...";
 
-      const isVideo = currentFile.type.startsWith("video/") || /\.(mp4|mkv|webm|mov|avi)$/i.test(currentFile.name);
-      const mediaEl = document.createElement(isVideo ? "video" : "audio");
-      mediaEl.src = currentObjectUrl;
-      const rate = speedModeSelect ? (parseFloat(speedModeSelect.value) || 1.0) : 1.0;
-      mediaEl.playbackRate = rate;
+      const formData = new FormData();
+      formData.append("file", currentFile);
+      formData.append("model", "whisper-large-v3-turbo");
+      formData.append("response_format", "verbose_json");
+      formData.append("language", languageSelect ? languageSelect.value : "es");
 
-      await new Promise(resolve => {
-        mediaEl.onloadedmetadata = () => resolve();
-        mediaEl.onerror = () => resolve();
-        setTimeout(resolve, 3000);
-      });
+      try {
+        progressPct.textContent = "50%";
+        progressBarFill.style.width = "50%";
 
-      const totalDuration = mediaEl.duration || 60;
-      const segments = [];
-      let segId = 1;
-      let chunkStartTime = 0;
+        const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: formData
+        });
 
-      const recognizer = new SpeechRecognition();
-      recognizer.lang = languageSelect ? languageSelect.value : "es-ES";
-      recognizer.continuous = true;
-      recognizer.interimResults = true;
-
-      recognizer.onresult = (event) => {
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const transcript = event.results[i][0].transcript.trim();
-          if (event.results[i].isFinal && transcript) {
-            const curTime = mediaEl.currentTime;
-            segments.push({
-              id: segId++,
-              start: Math.round(chunkStartTime * 10) / 10,
-              end: Math.round(curTime * 10) / 10,
-              timestamp: formatTimestamp(chunkStartTime),
-              text: transcript.charAt(0).toUpperCase() + transcript.slice(1) + "."
-            });
-            chunkStartTime = curTime;
-
-            livePreviewBox.classList.remove("hidden");
-            livePreviewText.textContent = `"${transcript}"`;
-          }
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error?.message || "Error al procesar con el motor Whisper.");
         }
-      };
 
-      recognizer.onerror = (e) => {
-        if (e.error !== "no-speech") console.warn("SpeechRec:", e.error);
-      };
+        progressPct.textContent = "90%";
+        progressBarFill.style.width = "90%";
+        progressMessage.textContent = "Estructurando párrafos y resumen ejecutivo...";
 
-      const progressTimer = setInterval(() => {
-        if (!isProcessing) { clearInterval(progressTimer); return; }
-        const cur = mediaEl.currentTime || 0;
-        const pct = Math.min(96, Math.round((cur / totalDuration) * 90) + 5);
-        progressPct.textContent = `${pct}%`;
-        progressBarFill.style.width = `${pct}%`;
-        progressMessage.textContent = `Analizando audio [${formatTimestamp(cur)} / ${formatTimestamp(totalDuration)}]...`;
-      }, 400);
+        const data = await res.json();
+        const duration = data.duration || 60;
+        const rawSegments = data.segments || [];
 
-      const finishTranscription = () => {
-        clearInterval(progressTimer);
-        try { recognizer.stop(); } catch (_) {}
-        try { mediaEl.pause(); } catch (_) {}
+        const segments = rawSegments.map((s, idx) => ({
+          id: idx + 1,
+          start: Math.round(s.start * 10) / 10,
+          end: Math.round(s.end * 10) / 10,
+          timestamp: formatTimestamp(s.start),
+          text: s.text.trim()
+        }));
+
+        // Si no vinieron segmentos individuales, usar el texto completo
+        if (segments.length === 0 && data.text) {
+          segments.push({
+            id: 1,
+            start: 0,
+            end: Math.round(duration),
+            timestamp: "00:00",
+            text: data.text.trim()
+          });
+        }
+
+        const analysis = analyzeTranscriptText(segments, duration);
+        const newItem = {
+          id: "trans_" + Date.now(),
+          title: currentFile.name.replace(/\.[^/.]+$/, ""),
+          duration: duration,
+          duration_formatted: formatTimestamp(duration),
+          word_count: analysis.stats.word_count,
+          language_name: languageSelect ? languageSelect.options[languageSelect.selectedIndex].text : "Español",
+          segments,
+          analysis
+        };
 
         progressPct.textContent = "100%";
         progressBarFill.style.width = "100%";
-        progressStatusTitle.textContent = "¡Transcripción completada!";
-        progressMessage.textContent = "Generando resumen algorítmico y modo lectura...";
 
         setTimeout(() => {
           progressCard.classList.add("hidden");
           btnStartTranscribe.disabled = false;
-          isProcessing = false;
-
-          const analysis = analyzeTranscriptText(segments, totalDuration);
-          const newItem = {
-            id: "rec_" + Date.now(),
-            title: currentFile.name.replace(/\.[^/.]+$/, ""),
-            media_type: isVideo ? "video" : "audio",
-            duration: totalDuration,
-            duration_formatted: formatTimestamp(totalDuration),
-            word_count: analysis.stats.word_count,
-            language_name: languageSelect ? languageSelect.options[languageSelect.selectedIndex].text : "Español",
-            segments,
-            analysis,
-            blobUrl: currentObjectUrl
-          };
-
+          clearSelectedFile();
           historyItems.unshift(newItem);
           saveLocalHistory();
           openItem(newItem);
-          showToast("Transcripción lista.");
-        }, 600);
-      };
+          showToast("Transcripción completada.");
+        }, 500);
 
-      mediaEl.onended = finishTranscription;
-      if (btnCancelTranscribe) btnCancelTranscribe.onclick = finishTranscription;
-
-      try {
-        recognizer.start();
-        mediaEl.play().catch(err => {
-          alert("Interactúa con la página para permitir el procesamiento de audio: " + err.message);
-          finishTranscription();
-        });
       } catch (err) {
-        alert("Error al iniciar el reconocedor de voz: " + err.message);
-        finishTranscription();
+        showToast(err.message, 5000);
+        btnStartTranscribe.disabled = false;
+        progressCard.classList.add("hidden");
       }
     });
   }
 
   // =========================================================================
-  // REUNIÓN EN VIVO DIRECTA (MICRÓFONO)
-  // =========================================================================
-  if (btnLiveSpeech) {
-    btnLiveSpeech.addEventListener("click", () => {
-      if (!SpeechRecognition) {
-        alert("Tu navegador no soporta Speech Recognition nativo. Usa Chrome o Edge.");
-        return;
-      }
-
-      const liveSegments = [];
-      let liveId = 1;
-      let segStart = 0;
-      let liveSec = 0;
-
-      recognitionInstance = new SpeechRecognition();
-      recognitionInstance.lang = languageSelect ? languageSelect.value : "es-ES";
-      recognitionInstance.continuous = true;
-      recognitionInstance.interimResults = true;
-
-      recognitionInstance.onresult = (event) => {
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            const txt = event.results[i][0].transcript.trim();
-            if (txt) {
-              liveSegments.push({
-                id: liveId++,
-                start: segStart,
-                end: liveSec,
-                timestamp: formatTimestamp(segStart),
-                text: txt.charAt(0).toUpperCase() + txt.slice(1) + "."
-              });
-              segStart = liveSec;
-            }
-          }
-        }
-      };
-
-      try {
-        recognitionInstance.start();
-        micDot.classList.add("recording");
-        recorderTimer.textContent = "00:00";
-        recorderTimer.classList.remove("hidden");
-        btnLiveSpeech.classList.add("hidden");
-        btnStopLiveSpeech.classList.remove("hidden");
-
-        const liveTimer = setInterval(() => {
-          liveSec++;
-          recorderTimer.textContent = formatTimestamp(liveSec);
-        }, 1000);
-
-        btnStopLiveSpeech.onclick = () => {
-          clearInterval(liveTimer);
-          try { recognitionInstance.stop(); } catch (_) {}
-          micDot.classList.remove("recording");
-          recorderTimer.classList.add("hidden");
-          btnStopLiveSpeech.classList.add("hidden");
-          btnLiveSpeech.classList.remove("hidden");
-
-          const analysis = analyzeTranscriptText(liveSegments, liveSec);
-          const newItem = {
-            id: "live_" + Date.now(),
-            title: "Reunión en Vivo " + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-            media_type: "audio",
-            duration: liveSec,
-            duration_formatted: formatTimestamp(liveSec),
-            word_count: analysis.stats.word_count,
-            language_name: languageSelect ? languageSelect.options[languageSelect.selectedIndex].text : "Español",
-            segments: liveSegments,
-            analysis,
-            blobUrl: null
-          };
-          historyItems.unshift(newItem);
-          saveLocalHistory();
-          openItem(newItem);
-          showToast("Reunión guardada.");
-        };
-      } catch (e) {
-        alert("No se pudo iniciar el micrófono: " + e.message);
-      }
-    });
-  }
-
-  // =========================================================================
-  // VISTA LECTOR Y REPRODUCTOR
+  // VISTA LECTOR
   // =========================================================================
   function openItem(item) {
-    pauseAllPlayers();
     currentItem = item;
     segmentsModified = false;
     if (btnSaveSegmentEdits) btnSaveSegmentEdits.classList.add("hidden");
@@ -617,23 +482,6 @@
     metaDuration.textContent = stats.duration_formatted || item.duration_formatted || "00:00";
     metaWords.textContent = `${stats.word_count || 0} palabras`;
     if (metaReadingTime) metaReadingTime.textContent = `~${stats.reading_time_minutes || 1} min`;
-
-    if (item.blobUrl) {
-      if (item.media_type === "video") {
-        audioWrapper.classList.add("hidden");
-        videoWrapper.classList.remove("hidden");
-        videoPlayer.src = item.blobUrl;
-        audioPlayer.removeAttribute("src");
-      } else {
-        videoWrapper.classList.add("hidden");
-        audioWrapper.classList.remove("hidden");
-        audioPlayer.src = item.blobUrl;
-        videoPlayer.removeAttribute("src");
-      }
-      document.getElementById("mediaPlayerCard").classList.remove("hidden");
-    } else {
-      document.getElementById("mediaPlayerCard").classList.add("hidden");
-    }
 
     renderReaderContent();
     renderHistoryList();
@@ -660,28 +508,20 @@
       paragraphsContainer.innerHTML = `<p style="color:var(--text-muted)">Sin texto de voz detectado.</p>`;
     } else {
       paragraphsContainer.innerHTML = paragraphs.map(p => `
-        <div class="reader-paragraph" data-start="${p.start}" data-end="${p.end}">
+        <div class="reader-paragraph">
           <span class="para-ts">${p.timestamp}</span>
           <span class="para-text">${highlightQuery(p.text, query)}</span>
         </div>
       `).join("");
-
-      paragraphsContainer.querySelectorAll(".reader-paragraph").forEach(el => {
-        el.addEventListener("click", () => seekToSeconds(parseFloat(el.getAttribute("data-start"))));
-      });
     }
 
     // 2. Segmentos
     segmentsContainer.innerHTML = segments.map((seg, idx) => `
-      <div class="segment-row" data-start="${seg.start}" data-end="${seg.end}">
-        <button class="segment-time-btn" data-seek="${seg.start}">${seg.timestamp}</button>
+      <div class="segment-row">
+        <span class="segment-time-btn">${seg.timestamp}</span>
         <div class="segment-text" contenteditable="true" spellcheck="false" data-idx="${idx}">${highlightQuery(seg.text, query)}</div>
       </div>
     `).join("");
-
-    segmentsContainer.querySelectorAll(".segment-time-btn").forEach(btn => {
-      btn.addEventListener("click", () => seekToSeconds(parseFloat(btn.getAttribute("data-seek"))));
-    });
 
     segmentsContainer.querySelectorAll(".segment-text").forEach(el => {
       el.addEventListener("input", () => {
@@ -699,14 +539,10 @@
 
     keyPointsList.innerHTML = (analysis.key_points || []).map(kp => `
       <li>
-        <button class="segment-time-btn" data-seek="${kp.start}">${kp.timestamp}</button>
+        <span class="segment-time-btn">${kp.timestamp}</span>
         <span>${highlightQuery(kp.text, query)}</span>
       </li>
     `).join("");
-
-    document.getElementById("tabSummary").querySelectorAll(".segment-time-btn").forEach(btn => {
-      btn.addEventListener("click", () => seekToSeconds(parseFloat(btn.getAttribute("data-seek"))));
-    });
 
     keywordsCloud.innerHTML = (analysis.keywords || []).map(kw => `
       <span class="keyword-chip">${escapeHtml(kw.word)} <small>×${kw.count}</small></span>
@@ -716,7 +552,7 @@
       questionsBlock.classList.remove("hidden");
       questionsList.innerHTML = analysis.questions.map(q => `
         <li>
-          <button class="segment-time-btn" data-seek="${q.start}">${q.timestamp}</button>
+          <span class="segment-time-btn">${q.timestamp}</span>
           <span>${escapeHtml(q.text)}</span>
         </li>
       `).join("");
@@ -725,44 +561,7 @@
     }
   }
 
-  // Sincronización Multimedia
-  function onMediaTimeUpdate(e) {
-    const cur = e.target.currentTime;
-    const autoScroll = chkAutoScroll ? chkAutoScroll.checked : true;
-
-    paragraphsContainer.querySelectorAll(".reader-paragraph").forEach(el => {
-      const s = parseFloat(el.getAttribute("data-start"));
-      const end = parseFloat(el.getAttribute("data-end"));
-      const active = (cur >= s && cur <= end + 0.3);
-      el.classList.toggle("active", active);
-      if (active && autoScroll && !document.getElementById("tabParagraphs").classList.contains("hidden")) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    });
-
-    segmentsContainer.querySelectorAll(".segment-row").forEach(el => {
-      const s = parseFloat(el.getAttribute("data-start"));
-      const end = parseFloat(el.getAttribute("data-end"));
-      const active = (cur >= s && cur <= end + 0.2);
-      el.classList.toggle("active", active);
-      if (active && autoScroll && !document.getElementById("tabSegments").classList.contains("hidden")) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    });
-  }
-  if (audioPlayer) audioPlayer.addEventListener("timeupdate", onMediaTimeUpdate);
-  if (videoPlayer) videoPlayer.addEventListener("timeupdate", onMediaTimeUpdate);
-
-  if (btnRewind5) btnRewind5.addEventListener("click", () => { const p = getActivePlayer(); if (p) p.currentTime = Math.max(0, p.currentTime - 5); });
-  if (btnForward5) btnForward5.addEventListener("click", () => { const p = getActivePlayer(); if (p) p.currentTime += 5; });
-  if (playbackSpeedSelect) {
-    playbackSpeedSelect.addEventListener("change", () => {
-      const r = parseFloat(playbackSpeedSelect.value) || 1;
-      if (audioPlayer) audioPlayer.playbackRate = r;
-      if (videoPlayer) videoPlayer.playbackRate = r;
-    });
-  }
-
+  // Pestañas
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -822,7 +621,7 @@
     });
   }
 
-  // EXPORTACIONES CLIENT-SIDE (DESCARGA DIRECTA EN EL NAVEGADOR)
+  // Exportaciones
   function downloadBlob(content, fileName, mimeType) {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
@@ -953,5 +752,6 @@
   }
 
   initTheme();
+  initApiKey();
   loadLocalHistory();
 })();
