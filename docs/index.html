@@ -104,6 +104,14 @@
                 <option value="es" selected>Español (Modelo Vosk / Kaldi Small)</option>
               </select>
             </div>
+            <div class="form-group">
+              <label for="speedModeSelect">Modo de Procesamiento</label>
+              <select id="speedModeSelect" class="form-select">
+                <option value="fast">Rápido (multinúcleo + omite silencios)</option>
+                <option value="balanced" selected>Equilibrado (2 núcleos + omite silencios)</option>
+                <option value="precise">Preciso (1 núcleo, audio continuo completo)</option>
+              </select>
+            </div>
           </div>
 
           <div class="submit-row">

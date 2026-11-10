@@ -9,7 +9,7 @@
   let historyItems = [];
   let readerFontSize = 1.05;
   let segmentsModified = false;
-  let loadedVoskModel = null;
+  let voskModelPool = []; // Un modelo = un Web Worker (un núcleo de CPU)
 
   // Modelo alojado en el mismo dominio de GitHub Pages (CORS 100% libre)
   // Se resuelve a URL absoluta: Vosk carga el modelo dentro de un Web Worker (blob:),
@@ -20,6 +20,19 @@
   const VOSK_ES_MODEL_URL = "https://raw.githubusercontent.com/AlexanderMartinez0410/Traductor-Audios-Reuniones/master/models/vosk-model-small-es-0.42.tar.gz";
   const VOSK_MODEL_LOAD_TIMEOUT_MS = 180000;
   const VOSK_CHUNK_TIMEOUT_MS = 30000;
+
+  // Perfiles velocidad ⇄ precisión
+  //  - workers: Web Workers en paralelo (cada uno carga su copia del modelo, ~150 MB RAM c/u)
+  //  - skipSilence: no envía a Kaldi los tramos sin voz (detección por energía RMS)
+  //  - unitSec: tamaño objetivo de cada bloque independiente (se corta en el punto más silencioso)
+  const CPU_CORES = navigator.hardwareConcurrency || 2;
+  const SPEED_PROFILES = {
+    fast:     { workers: Math.max(1, Math.min(4, CPU_CORES - 1)), skipSilence: true,  unitSec: 30 },
+    balanced: { workers: Math.max(1, Math.min(2, CPU_CORES - 1)), skipSilence: true,  unitSec: 45 },
+    precise:  { workers: 1,                                       skipSilence: false, unitSec: Infinity }
+  };
+  const VOSK_SEND_CHUNK_SEC = 4;   // tamaño de cada envío al Worker
+  const VOSK_INFLIGHT_CHUNKS = 3;  // envíos en vuelo (pipeline: el Worker nunca espera al hilo principal)
 
   const STOPWORDS = new Set([
     "el","la","los","las","un","una","unos","unas","lo","al","del","de","en","por","para","con","sin",
@@ -50,6 +63,7 @@
   const btnClearFile = document.getElementById("btnClearFile");
 
   const btnStartTranscribe = document.getElementById("btnStartTranscribe");
+  const speedModeSelect = document.getElementById("speedModeSelect");
 
   const progressCard = document.getElementById("progressCard");
   const progressStatusTitle = document.getElementById("progressStatusTitle");
@@ -386,6 +400,161 @@
     ]).finally(() => clearTimeout(timer));
   }
 
+  // Normaliza el volumen si la grabación está baja (mejora la detección de Kaldi)
+  function normalizeGain(pcm) {
+    let peak = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      const a = Math.abs(pcm[i]);
+      if (a > peak) peak = a;
+    }
+    if (peak > 0 && peak < 0.5) {
+      const gain = 0.9 / peak;
+      for (let i = 0; i < pcm.length; i++) pcm[i] *= gain;
+    }
+  }
+
+  // Divide el audio en bloques de trabajo independientes [startSample, endSample).
+  // - skipSilence: descarta tramos sin voz (energía RMS por ventanas de 100 ms)
+  // - Los tramos largos se cortan en el punto más silencioso cercano a unitSec
+  //   para no partir palabras al repartirlos entre varios núcleos.
+  function buildWorkUnits(pcm, sampleRate, { skipSilence, unitSec }) {
+    const frame = Math.round(sampleRate * 0.1);
+    const nFrames = Math.ceil(pcm.length / frame);
+    const rms = new Float32Array(nFrames);
+    for (let f = 0; f < nFrames; f++) {
+      let sum = 0;
+      const end = Math.min(pcm.length, (f + 1) * frame);
+      for (let i = f * frame; i < end; i++) sum += pcm[i] * pcm[i];
+      rms[f] = Math.sqrt(sum / Math.max(1, end - f * frame));
+    }
+
+    let regions = [[0, nFrames]];
+    if (skipSilence) {
+      const sorted = Array.from(rms).sort((a, b) => a - b);
+      const noiseFloor = sorted[Math.floor(sorted.length * 0.15)] || 0;
+      const threshold = Math.max(0.006, noiseFloor * 2.5);
+      const pad = 4;        // 0.4 s de margen a cada lado
+      const mergeGap = 8;   // une tramos separados por < 0.8 s
+      regions = [];
+      let f = 0;
+      while (f < nFrames) {
+        if (rms[f] < threshold) { f++; continue; }
+        let s = f;
+        while (f < nFrames && rms[f] >= threshold) f++;
+        let e = f;
+        s = Math.max(0, s - pad);
+        e = Math.min(nFrames, e + pad);
+        const last = regions[regions.length - 1];
+        if (last && s - last[1] < mergeGap) last[1] = e;
+        else regions.push([s, e]);
+      }
+      regions = regions.filter(([s, e]) => e - s >= 3);
+    }
+
+    const unitFrames = Number.isFinite(unitSec) ? Math.round(unitSec * 10) : Infinity;
+    const searchWin = 50; // busca el corte en ±5 s
+    const units = [];
+    for (let [s, e] of regions) {
+      while (e - s > unitFrames + searchWin) {
+        const target = s + unitFrames;
+        let cut = target;
+        for (let k = target - searchWin; k <= target + searchWin; k++) {
+          if (rms[k] < rms[cut]) cut = k;
+        }
+        units.push([s * frame, cut * frame]);
+        s = cut;
+      }
+      units.push([s * frame, Math.min(pcm.length, e * frame)]);
+    }
+    return units;
+  }
+
+  // Garantiza `count` modelos cargados (uno por Worker). El primero descarga y cachea en
+  // IndexedDB; los siguientes se cargan en serie desde la caché para no competir por IDBFS.
+  async function ensureVoskModels(count, onStatus) {
+    while (voskModelPool.length < count) {
+      const idx = voskModelPool.length;
+      onStatus(idx);
+      try {
+        const model = await withTimeout(
+          Vosk.createModel(VOSK_ES_MODEL_URL),
+          VOSK_MODEL_LOAD_TIMEOUT_MS,
+          "Tiempo de espera agotado cargando el modelo Vosk."
+        );
+        voskModelPool.push(model);
+      } catch (err) {
+        console.warn(`Error cargando modelo Vosk #${idx + 1}:`, err);
+        break; // seguimos con los núcleos que sí cargaron
+      }
+    }
+    return voskModelPool.slice(0, count);
+  }
+
+  // Transcribe un bloque con un recognizer nuevo (tiempos relativos al bloque).
+  // Cada envío al Worker responde con exactamente un evento result/partialresult,
+  // lo que permite mantener un pipeline acotado y medir progreso real.
+  async function transcribeUnit(model, pcm, [startSample, endSample], sampleRate, onSamplesDone) {
+    const recognizer = new model.KaldiRecognizer(sampleRate);
+    recognizer.setWords(true);
+    const results = [];
+    let acked = 0;
+    let failure = null;
+    let waiters = [];
+    const chunkLens = [];
+    const ack = () => {
+      if (chunkLens[acked]) onSamplesDone(chunkLens[acked]);
+      acked++;
+      const pending = waiters; waiters = [];
+      pending.forEach((w) => w());
+    };
+    recognizer.on("result", (m) => { results.push(m.result); ack(); });
+    recognizer.on("partialresult", ack);
+    recognizer.on("error", (m) => { failure = new Error(m.error || "Error en el motor Kaldi"); ack(); });
+    const waitAcked = (n) => withTimeout(
+      new Promise((resolve) => {
+        const check = () => (acked >= n || failure ? resolve() : waiters.push(check));
+        check();
+      }),
+      VOSK_CHUNK_TIMEOUT_MS,
+      "El motor Kaldi dejó de responder durante la transcripción."
+    );
+
+    const chunk = sampleRate * VOSK_SEND_CHUNK_SEC;
+    let sent = 0;
+    try {
+      for (let i = startSample; i < endSample; i += chunk) {
+        if (sent - acked >= VOSK_INFLIGHT_CHUNKS) await waitAcked(sent - VOSK_INFLIGHT_CHUNKS + 1);
+        if (failure) throw failure;
+        const end = Math.min(endSample, i + chunk);
+        chunkLens.push(end - i);
+        recognizer.acceptWaveformFloat(pcm.subarray(i, end), sampleRate);
+        sent++;
+      }
+      chunkLens.push(0);
+      recognizer.retrieveFinalResult();
+      sent++;
+      await waitAcked(sent);
+      if (failure) throw failure;
+    } finally {
+      recognizer.remove();
+    }
+
+    const offset = startSample / sampleRate;
+    const unitEnd = endSample / sampleRate;
+    const segs = [];
+    let cursor = offset;
+    for (const r of results) {
+      const text = r && r.text ? r.text.trim() : "";
+      if (!text) continue;
+      const words = Array.isArray(r.result) ? r.result : [];
+      const start = words.length ? offset + words[0].start : cursor;
+      const end = words.length ? offset + words[words.length - 1].end : unitEnd;
+      cursor = end;
+      segs.push({ start, end, text });
+    }
+    return segs;
+  }
+
   // =========================================================================
   // TRANSCRIPCIÓN CON KALDI / VOSK WEBASSEMBLY (CLIENT-SIDE Y SILENCIOSO)
   // =========================================================================
@@ -415,78 +584,63 @@
         progressBarFill.style.width = "55%";
         progressMessage.textContent = "Si es la primera vez, se descarga el modelo en español (~40 MB)...";
 
-        // Cargar Vosk Wasm
-        if (!loadedVoskModel && window.Vosk) {
-          try {
-            loadedVoskModel = await withTimeout(
-              Vosk.createModel(VOSK_ES_MODEL_URL),
-              VOSK_MODEL_LOAD_TIMEOUT_MS,
-              "Tiempo de espera agotado cargando el modelo Vosk."
-            );
-          } catch (modelErr) {
-            console.warn("Error cargando modelo remoto de Vosk:", modelErr);
-          }
-        }
+        // Perfil elegido por el usuario
+        const modeKey = (speedModeSelect && speedModeSelect.value) || "balanced";
+        const profile = SPEED_PROFILES[modeKey] || SPEED_PROFILES.balanced;
+
+        normalizeGain(pcmData);
+        const units = buildWorkUnits(pcmData, sampleRate, profile);
+        const totalSamples = units.reduce((acc, [s, e]) => acc + (e - s), 0);
+        const skippedSec = Math.max(0, duration - totalSamples / sampleRate);
+
+        // Cargar Vosk Wasm (1 Worker por núcleo que se vaya a usar)
+        const workerCount = Math.max(1, Math.min(profile.workers, units.length || 1));
+        const models = window.Vosk
+          ? await ensureVoskModels(workerCount, (idx) => {
+              progressMessage.textContent = idx === 0
+                ? "Si es la primera vez, se descarga el modelo en español (~40 MB)..."
+                : `Preparando núcleo ${idx + 1} de ${workerCount} (desde caché)...`;
+            })
+          : [];
 
         const segments = [];
-        let segId = 1;
 
-        if (loadedVoskModel) {
-          progressStatusTitle.textContent = "Decodificando fonemas con Kaldi en WebAssembly...";
-          const recognizer = new loadedVoskModel.KaldiRecognizer(sampleRate);
-          recognizer.setWords(true);
-
-          // vosk-browser es asíncrono (Web Worker): cada bloque enviado responde con
-          // exactamente un evento "result" o "partialresult". Enviamos un bloque y
-          // esperamos su respuesta para tener progreso real y no saturar memoria.
-          let pendingResolve = null;
-          const pushResult = (result, fallbackStart, fallbackEnd) => {
-            const text = result && result.text ? result.text.trim() : "";
-            if (!text) return;
-            const words = Array.isArray(result.result) ? result.result : [];
-            const startSec = Math.round((words.length ? words[0].start : fallbackStart) * 10) / 10;
-            const endSec = Math.round((words.length ? words[words.length - 1].end : fallbackEnd) * 10) / 10;
-            segments.push({
-              id: segId++,
-              start: startSec,
-              end: endSec,
-              timestamp: formatTimestamp(startSec),
-              text: text.charAt(0).toUpperCase() + text.slice(1) + "."
-            });
-          };
-          let lastSegmentEnd = 0;
-          let currentChunkEnd = 0;
-          recognizer.on("result", (message) => {
-            pushResult(message.result, lastSegmentEnd, Math.min(duration, currentChunkEnd));
-            lastSegmentEnd = Math.min(duration, currentChunkEnd);
-            if (pendingResolve) pendingResolve();
-          });
-          recognizer.on("partialresult", () => {
-            if (pendingResolve) pendingResolve();
-          });
-          const waitForWorker = () => withTimeout(
-            new Promise((resolve) => { pendingResolve = resolve; }),
-            VOSK_CHUNK_TIMEOUT_MS,
-            "El motor Kaldi dejó de responder durante la transcripción."
-          ).finally(() => { pendingResolve = null; });
-
-          const chunkSize = sampleRate * 2; // Bloques de 2 segundos
-          for (let i = 0; i < pcmData.length; i += chunkSize) {
-            currentChunkEnd = (i + chunkSize) / sampleRate;
-            const ack = waitForWorker();
-            recognizer.acceptWaveformFloat(pcmData.subarray(i, i + chunkSize), sampleRate);
-            await ack;
-            const curPct = Math.min(95, 55 + Math.round((i / pcmData.length) * 40));
+        if (models.length) {
+          progressStatusTitle.textContent = `Decodificando con Kaldi · ${models.length} núcleo(s)...`;
+          const t0 = performance.now();
+          let processed = 0;
+          const onSamplesDone = (n) => {
+            processed += n;
+            const ratio = totalSamples ? processed / totalSamples : 1;
+            const curPct = Math.min(95, 55 + Math.round(ratio * 40));
             progressPct.textContent = `${curPct}%`;
             progressBarFill.style.width = `${curPct}%`;
-            progressMessage.textContent = `Procesando muestras [${formatTimestamp(i / sampleRate)} / ${formatTimestamp(duration)}]...`;
-          }
+            const elapsed = (performance.now() - t0) / 1000;
+            const eta = ratio > 0.02 ? Math.max(0, elapsed / ratio - elapsed) : null;
+            progressMessage.textContent =
+              `Procesado ${formatTimestamp(processed / sampleRate)} / ${formatTimestamp(totalSamples / sampleRate)} de voz` +
+              (skippedSec >= 1 ? ` · ${formatTimestamp(skippedSec)} de silencio omitido` : "") +
+              (eta !== null ? ` · faltan ~${formatTimestamp(eta)}` : "");
+          };
 
-          currentChunkEnd = duration;
-          const finalAck = waitForWorker();
-          recognizer.retrieveFinalResult();
-          await finalAck;
-          recognizer.remove();
+          // Cola compartida: cada Worker toma el siguiente bloque libre
+          let nextUnit = 0;
+          await Promise.all(models.map(async (model) => {
+            while (nextUnit < units.length) {
+              const unit = units[nextUnit++];
+              const segs = await transcribeUnit(model, pcmData, unit, sampleRate, onSamplesDone);
+              segments.push(...segs);
+            }
+          }));
+
+          segments.sort((a, b) => a.start - b.start);
+          segments.forEach((seg, i) => {
+            seg.id = i + 1;
+            seg.start = Math.round(seg.start * 10) / 10;
+            seg.end = Math.round(Math.min(duration, seg.end) * 10) / 10;
+            seg.timestamp = formatTimestamp(seg.start);
+            seg.text = seg.text.charAt(0).toUpperCase() + seg.text.slice(1) + ".";
+          });
         } else {
           // Fallback informativo si el navegador bloquea la descarga del zip de Vosk por CORS
           throw new Error("No se pudo cargar el diccionario de Vosk en el navegador. Recuerda que puedes descargar el archivo 'iniciar.bat' desde la barra lateral izquierda para ejecutar Kaldi en tu PC sin límites.");
