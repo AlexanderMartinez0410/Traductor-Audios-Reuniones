@@ -8,7 +8,6 @@ data/media/*
 !data/media/.gitkeep
 data/models/*
 !data/models/.gitkeep
-!docs/models/vosk-model-small-es-0.42.zip
 *.mp3
 *.wav
 *.mp4

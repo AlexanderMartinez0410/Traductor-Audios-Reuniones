@@ -14,9 +14,10 @@
   // Modelo alojado en el mismo dominio de GitHub Pages (CORS 100% libre)
   // Se resuelve a URL absoluta: Vosk carga el modelo dentro de un Web Worker (blob:),
   // donde las rutas relativas pierden el subdirectorio del repo (/Traductor-Audios-Reuniones/).
-  // IMPORTANTE: vosk-browser solo acepta modelos empaquetados como .tar.gz (no .zip);
-  // con un .zip el Worker no logra extraerlo y createModel() nunca resuelve.
-  const VOSK_ES_MODEL_URL = new URL("models/vosk-model-small-es-0.42.tar.gz", document.baseURI).href;
+  // El modelo (~40 MB) vive fuera de docs/ para no exceder el tiempo límite del deploy de
+  // GitHub Pages; se sirve desde raw.githubusercontent.com (CORS: *), accesible desde el Worker.
+  // IMPORTANTE: vosk-browser solo acepta modelos empaquetados como .tar.gz (no .zip).
+  const VOSK_ES_MODEL_URL = "https://raw.githubusercontent.com/AlexanderMartinez0410/Traductor-Audios-Reuniones/master/models/vosk-model-small-es-0.42.tar.gz";
   const VOSK_MODEL_LOAD_TIMEOUT_MS = 180000;
   const VOSK_CHUNK_TIMEOUT_MS = 30000;
 
