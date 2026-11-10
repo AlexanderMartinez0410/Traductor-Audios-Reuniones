@@ -12,7 +12,9 @@
   let loadedVoskModel = null;
 
   // Modelo alojado en el mismo dominio de GitHub Pages (CORS 100% libre)
-  const VOSK_ES_MODEL_URL = "models/vosk-model-small-es-0.42.zip";
+  // Se resuelve a URL absoluta: Vosk carga el modelo dentro de un Web Worker (blob:),
+  // donde las rutas relativas pierden el subdirectorio del repo (/Traductor-Audios-Reuniones/).
+  const VOSK_ES_MODEL_URL = new URL("models/vosk-model-small-es-0.42.zip", document.baseURI).href;
 
   const STOPWORDS = new Set([
     "el","la","los","las","un","una","unos","unas","lo","al","del","de","en","por","para","con","sin",
