@@ -14,7 +14,11 @@
   // Modelo alojado en el mismo dominio de GitHub Pages (CORS 100% libre)
   // Se resuelve a URL absoluta: Vosk carga el modelo dentro de un Web Worker (blob:),
   // donde las rutas relativas pierden el subdirectorio del repo (/Traductor-Audios-Reuniones/).
-  const VOSK_ES_MODEL_URL = new URL("models/vosk-model-small-es-0.42.zip", document.baseURI).href;
+  // IMPORTANTE: vosk-browser solo acepta modelos empaquetados como .tar.gz (no .zip);
+  // con un .zip el Worker no logra extraerlo y createModel() nunca resuelve.
+  const VOSK_ES_MODEL_URL = new URL("models/vosk-model-small-es-0.42.tar.gz", document.baseURI).href;
+  const VOSK_MODEL_LOAD_TIMEOUT_MS = 180000;
+  const VOSK_CHUNK_TIMEOUT_MS = 30000;
 
   const STOPWORDS = new Set([
     "el","la","los","las","un","una","unos","unas","lo","al","del","de","en","por","para","con","sin",
@@ -366,14 +370,19 @@
     const resampledBuffer = await offlineCtx.startRendering();
     const channelData = resampledBuffer.getChannelData(0);
 
-    // Convertir Float32Array a Int16Array PCM
-    const pcmData = new Int16Array(channelData.length);
-    for (let i = 0; i < channelData.length; i++) {
-      const s = Math.max(-1, Math.min(1, channelData[i]));
-      pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
+    // vosk-browser recibe Float32 [-1, 1] y hace la conversión a rango int16 internamente
+    return { pcmData: channelData, duration, sampleRate };
+  }
 
-    return { pcmData, duration, sampleRate };
+  // Rechaza la promesa si no se resuelve en el tiempo indicado (evita cuelgues infinitos)
+  function withTimeout(promise, ms, message) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]).finally(() => clearTimeout(timer));
   }
 
   // =========================================================================
@@ -408,7 +417,11 @@
         // Cargar Vosk Wasm
         if (!loadedVoskModel && window.Vosk) {
           try {
-            loadedVoskModel = await Vosk.createModel(VOSK_ES_MODEL_URL);
+            loadedVoskModel = await withTimeout(
+              Vosk.createModel(VOSK_ES_MODEL_URL),
+              VOSK_MODEL_LOAD_TIMEOUT_MS,
+              "Tiempo de espera agotado cargando el modelo Vosk."
+            );
           } catch (modelErr) {
             console.warn("Error cargando modelo remoto de Vosk:", modelErr);
           }
@@ -422,41 +435,57 @@
           const recognizer = new loadedVoskModel.KaldiRecognizer(sampleRate);
           recognizer.setWords(true);
 
+          // vosk-browser es asíncrono (Web Worker): cada bloque enviado responde con
+          // exactamente un evento "result" o "partialresult". Enviamos un bloque y
+          // esperamos su respuesta para tener progreso real y no saturar memoria.
+          let pendingResolve = null;
+          const pushResult = (result, fallbackStart, fallbackEnd) => {
+            const text = result && result.text ? result.text.trim() : "";
+            if (!text) return;
+            const words = Array.isArray(result.result) ? result.result : [];
+            const startSec = Math.round((words.length ? words[0].start : fallbackStart) * 10) / 10;
+            const endSec = Math.round((words.length ? words[words.length - 1].end : fallbackEnd) * 10) / 10;
+            segments.push({
+              id: segId++,
+              start: startSec,
+              end: endSec,
+              timestamp: formatTimestamp(startSec),
+              text: text.charAt(0).toUpperCase() + text.slice(1) + "."
+            });
+          };
+          let lastSegmentEnd = 0;
+          let currentChunkEnd = 0;
+          recognizer.on("result", (message) => {
+            pushResult(message.result, lastSegmentEnd, Math.min(duration, currentChunkEnd));
+            lastSegmentEnd = Math.min(duration, currentChunkEnd);
+            if (pendingResolve) pendingResolve();
+          });
+          recognizer.on("partialresult", () => {
+            if (pendingResolve) pendingResolve();
+          });
+          const waitForWorker = () => withTimeout(
+            new Promise((resolve) => { pendingResolve = resolve; }),
+            VOSK_CHUNK_TIMEOUT_MS,
+            "El motor Kaldi dejó de responder durante la transcripción."
+          ).finally(() => { pendingResolve = null; });
+
           const chunkSize = sampleRate * 2; // Bloques de 2 segundos
           for (let i = 0; i < pcmData.length; i += chunkSize) {
-            const chunk = pcmData.subarray(i, i + chunkSize);
-            if (recognizer.acceptWaveform(chunk)) {
-              const res = recognizer.result();
-              if (res && res.text && res.text.trim()) {
-                const startSec = Math.round((i / sampleRate) * 10) / 10;
-                const endSec = Math.round(Math.min(duration, (i + chunkSize) / sampleRate) * 10) / 10;
-                segments.push({
-                  id: segId++,
-                  start: startSec,
-                  end: endSec,
-                  timestamp: formatTimestamp(startSec),
-                  text: res.text.trim().charAt(0).toUpperCase() + res.text.trim().slice(1) + "."
-                });
-              }
-            }
+            currentChunkEnd = (i + chunkSize) / sampleRate;
+            const ack = waitForWorker();
+            recognizer.acceptWaveformFloat(pcmData.subarray(i, i + chunkSize), sampleRate);
+            await ack;
             const curPct = Math.min(95, 55 + Math.round((i / pcmData.length) * 40));
             progressPct.textContent = `${curPct}%`;
             progressBarFill.style.width = `${curPct}%`;
             progressMessage.textContent = `Procesando muestras [${formatTimestamp(i / sampleRate)} / ${formatTimestamp(duration)}]...`;
           }
 
-          const finalRes = recognizer.finalResult();
-          if (finalRes && finalRes.text && finalRes.text.trim()) {
-            const lastStart = segments.length > 0 ? segments[segments.length - 1].end : 0;
-            segments.push({
-              id: segId++,
-              start: lastStart,
-              end: Math.round(duration * 10) / 10,
-              timestamp: formatTimestamp(lastStart),
-              text: finalRes.text.trim().charAt(0).toUpperCase() + finalRes.text.trim().slice(1) + "."
-            });
-          }
-          recognizer.free();
+          currentChunkEnd = duration;
+          const finalAck = waitForWorker();
+          recognizer.retrieveFinalResult();
+          await finalAck;
+          recognizer.remove();
         } else {
           // Fallback informativo si el navegador bloquea la descarga del zip de Vosk por CORS
           throw new Error("No se pudo cargar el diccionario de Vosk en el navegador. Recuerda que puedes descargar el archivo 'iniciar.bat' desde la barra lateral izquierda para ejecutar Kaldi en tu PC sin límites.");
@@ -467,6 +496,7 @@
         progressStatusTitle.textContent = "Transcripción completada.";
         progressMessage.textContent = "Generando resumen algorítmico y modo lectura...";
 
+        const fileTitle = currentFile.name.replace(/\.[^/.]+$/, "");
         setTimeout(() => {
           progressCard.classList.add("hidden");
           btnStartTranscribe.disabled = false;
@@ -475,7 +505,7 @@
           const analysis = analyzeTranscriptText(segments, duration);
           const newItem = {
             id: "trans_" + Date.now(),
-            title: currentFile.name.replace(/\.[^/.]+$/, ""),
+            title: fileTitle,
             duration: duration,
             duration_formatted: formatTimestamp(duration),
             word_count: analysis.stats.word_count,
